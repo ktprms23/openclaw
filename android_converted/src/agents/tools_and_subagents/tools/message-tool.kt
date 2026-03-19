@@ -1,0 +1,787 @@
+package agents.tools_and_subagents.tools
+
+// Converted from src/agents/tools/message-tool.ts for the Kotlin Phase 2 tools/subagents port.
+// This is a structural source-to-source translation and is not expected to compile yet.
+// TODO: Replace placeholder imports and runtime dependencies with Android/Kotlin equivalents.
+// TODO: TypeScript import retained for manual wiring: import { Type, type TSchema } from "@sinclair/typebox";
+// TODO: TypeScript import retained for manual wiring: import { listChannelPlugins } from "../../channels/plugins/index.js";
+// TODO: TypeScript import retained for manual wiring: import {
+  channelSupportsMessageCapability,
+  channelSupportsMessageCapabilityForChannel,
+  listChannelMessageActions,
+  resolveChannelMessageToolSchemaProperties,
+} from "../../channels/plugins/message-action-discovery.js"
+// TODO: TypeScript import retained for manual wiring: import type { ChannelMessageCapability } from "../../channels/plugins/message-capabilities.js";
+// TODO: TypeScript import retained for manual wiring: import {
+  CHANNEL_MESSAGE_ACTION_NAMES,
+  type ChannelMessageActionName,
+} from "../../channels/plugins/types.js"
+// TODO: TypeScript import retained for manual wiring: import { resolveCommandSecretRefsViaGateway } from "../../cli/command-secret-gateway.js";
+// TODO: TypeScript import retained for manual wiring: import { getScopedChannelsCommandSecretTargets } from "../../cli/command-secret-targets.js";
+// TODO: TypeScript import retained for manual wiring: import { resolveMessageSecretScope } from "../../cli/message-secret-scope.js";
+// TODO: TypeScript import retained for manual wiring: import type { OpenClawConfig } from "../../config/config.js";
+// TODO: TypeScript import retained for manual wiring: import { loadConfig } from "../../config/config.js";
+// TODO: TypeScript import retained for manual wiring: import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "../../gateway/protocol/client-info.js";
+// TODO: TypeScript import retained for manual wiring: import { getToolResult, runMessageAction } from "../../infra/outbound/message-action-runner.js";
+// TODO: TypeScript import retained for manual wiring: import { POLL_CREATION_PARAM_DEFS, SHARED_POLL_CREATION_PARAM_NAMES } from "../../poll-params.js";
+// TODO: TypeScript import retained for manual wiring: import { normalizeAccountId } from "../../routing/session-key.js";
+// TODO: TypeScript import retained for manual wiring: import { stripReasoningTagsFromText } from "../../shared/text/reasoning-tags.js";
+// TODO: TypeScript import retained for manual wiring: import { normalizeMessageChannel } from "../../utils/message-channel.js";
+// TODO: TypeScript import retained for manual wiring: import { resolveSessionAgentId } from "../agent-scope.js";
+// TODO: TypeScript import retained for manual wiring: import { listChannelSupportedActions } from "../channel-tools.js";
+// TODO: TypeScript import retained for manual wiring: import { channelTargetSchema, channelTargetsSchema, stringEnum } from "../schema/typebox.js";
+// TODO: TypeScript import retained for manual wiring: import type { AnyAgentTool } from "./common.js";
+// TODO: TypeScript import retained for manual wiring: import { jsonResult, readNumberParam, readStringParam } from "./common.js";
+// TODO: TypeScript import retained for manual wiring: import { resolveGatewayOptions } from "./gateway.js";
+
+val AllMessageActions = CHANNEL_MESSAGE_ACTION_NAMES
+val EXPLICIT_TARGET_ACTIONS = new MutableSet<ChannelMessageActionName>([
+  "send",
+  "sendWithEffect",
+  "sendAttachment",
+  "reply",
+  "thread-reply",
+  "broadcast",
+])
+
+fun actionNeedsExplicitTarget(action: ChannelMessageActionName): Boolean {
+  return EXPLICIT_TARGET_ACTIONS.has(action)
+}
+fun buildRoutingSchema() {
+  return {
+    channel: Type.Optional(Type.String()),
+    target: Type.Optional(channelTargetSchema({ description: String /* "Target channel/user id or name." */ })),
+    targets: Type.Optional(channelTargetsSchema()),
+    accountId: Type.Optional(Type.String()),
+    dryRun: Type.Optional(Type.Boolean()),
+  }
+}
+
+val interactiveOptionSchema = Type.Object({
+  label: Type.String(),
+  value: Type.String(),
+})
+
+val interactiveButtonSchema = Type.Object({
+  label: Type.String(),
+  value: Type.String(),
+  style: Type.Optional(stringEnum(["primary", "secondary", "success", "danger"])),
+})
+
+val interactiveBlockSchema = Type.Object({
+  type: stringEnum(["text", "buttons", "select"]),
+  text: Type.Optional(Type.String()),
+  buttons: Type.Optional(Type.Array(interactiveButtonSchema)),
+  placeholder: Type.Optional(Type.String()),
+  options: Type.Optional(Type.Array(interactiveOptionSchema)),
+})
+
+val interactiveMessageSchema = Type.Object(
+  {
+    blocks: Type.Array(interactiveBlockSchema),
+  },
+  {
+    description: String /* "Shared interactive message payload for buttons and selects. Channels render this into their native components when supported." */,
+  },
+)
+
+fun buildSendSchema(options: { includeInteractive: Boolean }) {
+  val props: MutableMap<String, TSchema> = {
+    message: Type.Optional(Type.String()),
+    effectId: Type.Optional(
+      Type.String({
+        description: String /* "Message effect name/id for sendWithEffect (e.g., invisible ink)." */,
+      }),
+    ),
+    effect: Type.Optional(
+      Type.String({ description: String /* "Alias for effectId (e.g., invisible-ink, balloons)." */ }),
+    ),
+    media: Type.Optional(
+      Type.String({
+        description: String /* "Media URL or local path. data: URLs are not supported here, use buffer." */,
+      }),
+    ),
+    filename: Type.Optional(Type.String()),
+    buffer: Type.Optional(
+      Type.String({
+        description: String /* "Base64 payload for attachments (optionally a data: URL)." */,
+      }),
+    ),
+    contentType: Type.Optional(Type.String()),
+    mimeType: Type.Optional(Type.String()),
+    caption: Type.Optional(Type.String()),
+    path: Type.Optional(Type.String()),
+    filePath: Type.Optional(Type.String()),
+    replyTo: Type.Optional(Type.String()),
+    threadId: Type.Optional(Type.String()),
+    asVoice: Type.Optional(Type.Boolean()),
+    silent: Type.Optional(Type.Boolean()),
+    quoteText: Type.Optional(
+      Type.String({ description: String /* "Quote text for Telegram reply_parameters" */ }),
+    ),
+    bestEffort: Type.Optional(Type.Boolean()),
+    gifPlayback: Type.Optional(Type.Boolean()),
+    forceDocument: Type.Optional(
+      Type.Boolean({
+        description: String /* "Send image/GIF as /* TODO */ document to avoid Telegram compression (Telegram only)." */,
+      }),
+    ),
+    interactive: Type.Optional(interactiveMessageSchema),
+  }
+  if (!options.includeInteractive) {
+    delete props.interactive
+  }
+  return props
+}
+
+fun buildReactionSchema() {
+  return {
+    messageId: Type.Optional(
+      Type.String({
+        description: String /* "Target message id for reaction. If omitted, defaults to the current inbound message id when available." */,
+      }),
+    ),
+    message_id: Type.Optional(
+      Type.String({
+        // Intentional duplicate alias for tool-schema discoverability in LLMs.
+        description: String /* "snake_case alias of messageId. If omitted, defaults to the current inbound message id when available." */,
+      }),
+    ),
+    emoji: Type.Optional(Type.String()),
+    remove: Type.Optional(Type.Boolean()),
+    targetAuthor: Type.Optional(Type.String()),
+    targetAuthorUuid: Type.Optional(Type.String()),
+    groupId: Type.Optional(Type.String()),
+  }
+}
+
+fun buildFetchSchema() {
+  return {
+    limit: Type.Optional(Type.Number()),
+    pageSize: Type.Optional(Type.Number()),
+    pageToken: Type.Optional(Type.String()),
+    before: Type.Optional(Type.String()),
+    after: Type.Optional(Type.String()),
+    around: Type.Optional(Type.String()),
+    fromMe: Type.Optional(Type.Boolean()),
+    includeArchived: Type.Optional(Type.Boolean()),
+  }
+}
+
+fun buildPollSchema() {
+  val props: MutableMap<String, TSchema> = {
+    pollId: Type.Optional(Type.String()),
+    pollOptionId: Type.Optional(
+      Type.String({
+        description: String /* "Poll answer id to vote for. Use when the channel exposes stable answer ids." */,
+      }),
+    ),
+    pollOptionIds: Type.Optional(
+      Type.Array(
+        Type.String({
+          description: String /* "Poll answer ids to vote for in a multiselect poll. Use when the channel exposes stable answer ids." */,
+        }),
+      ),
+    ),
+    pollOptionIndex: Type.Optional(
+      Type.Number({
+        description: String /* "1-based poll option Double to vote for, matching the rendered numbered poll choices." */,
+      }),
+    ),
+    pollOptionIndexes: Type.Optional(
+      Type.Array(
+        Type.Number({
+          description: String /* "1-based poll option numbers to vote for in a multiselect poll, matching the rendered numbered poll choices." */,
+        }),
+      ),
+    ),
+  }
+  for (val name of SHARED_POLL_CREATION_PARAM_NAMES) {
+    val def = POLL_CREATION_PARAM_DEFS[name]
+    switch (def.kind) {
+      case "String":
+        props[name] = Type.Optional(Type.String())
+        break
+      case "stringArray":
+        props[name] = Type.Optional(Type.Array(Type.String()))
+        break
+      case "Double":
+        props[name] = Type.Optional(Type.Number())
+        break
+      case "Boolean":
+        props[name] = Type.Optional(Type.Boolean())
+        break
+    }
+  }
+  return props
+}
+
+fun buildChannelTargetSchema() {
+  return {
+    channelId: Type.Optional(
+      Type.String({ description: String /* "Channel id filter (search/thread list/event create)." */ }),
+    ),
+    chatId: Type.Optional(
+      Type.String({ description: String /* "Chat id for chat-scoped metadata actions." */ }),
+    ),
+    channelIds: Type.Optional(
+      Type.Array(Type.String({ description: String /* "Channel id filter (repeatable)." */ })),
+    ),
+    memberId: Type.Optional(Type.String()),
+    memberIdType: Type.Optional(Type.String()),
+    guildId: Type.Optional(Type.String()),
+    userId: Type.Optional(Type.String()),
+    openId: Type.Optional(Type.String()),
+    unionId: Type.Optional(Type.String()),
+    authorId: Type.Optional(Type.String()),
+    authorIds: Type.Optional(Type.Array(Type.String())),
+    roleId: Type.Optional(Type.String()),
+    roleIds: Type.Optional(Type.Array(Type.String())),
+    participant: Type.Optional(Type.String()),
+    includeMembers: Type.Optional(Type.Boolean()),
+    members: Type.Optional(Type.Boolean()),
+    scope: Type.Optional(Type.String()),
+    kind: Type.Optional(Type.String()),
+  }
+}
+
+fun buildStickerSchema() {
+  return {
+    emojiName: Type.Optional(Type.String()),
+    stickerId: Type.Optional(Type.Array(Type.String())),
+    stickerName: Type.Optional(Type.String()),
+    stickerDesc: Type.Optional(Type.String()),
+    stickerTags: Type.Optional(Type.String()),
+  }
+}
+
+fun buildThreadSchema() {
+  return {
+    threadName: Type.Optional(Type.String()),
+    autoArchiveMin: Type.Optional(Type.Number()),
+    appliedTags: Type.Optional(Type.Array(Type.String())),
+  }
+}
+
+fun buildEventSchema() {
+  return {
+    query: Type.Optional(Type.String()),
+    eventName: Type.Optional(Type.String()),
+    eventType: Type.Optional(Type.String()),
+    startTime: Type.Optional(Type.String()),
+    endTime: Type.Optional(Type.String()),
+    desc: Type.Optional(Type.String()),
+    location: Type.Optional(Type.String()),
+    durationMin: Type.Optional(Type.Number()),
+    until: Type.Optional(Type.String()),
+  }
+}
+
+fun buildModerationSchema() {
+  return {
+    reason: Type.Optional(Type.String()),
+    deleteDays: Type.Optional(Type.Number()),
+  }
+}
+
+fun buildGatewaySchema() {
+  return {
+    gatewayUrl: Type.Optional(Type.String()),
+    gatewayToken: Type.Optional(Type.String()),
+    timeoutMs: Type.Optional(Type.Number()),
+  }
+}
+
+fun buildPresenceSchema() {
+  return {
+    activityType: Type.Optional(
+      Type.String({
+        description: String /* "Activity type: playing, streaming, listening, watching, competing, custom." */,
+      }),
+    ),
+    activityName: Type.Optional(
+      Type.String({
+        description: String /* "Activity name shown in sidebar (e.g. 'with fire'). Ignored for custom type." */,
+      }),
+    ),
+    activityUrl: Type.Optional(
+      Type.String({
+        description: String /* "Streaming URL (Twitch or YouTube). Only used with streaming type may not render for bots." */,
+      }),
+    ),
+    activityState: Type.Optional(
+      Type.String({
+        description: String /* "State text. For custom type this is the status text for others it shows in the flyout." */,
+      }),
+    ),
+    status: Type.Optional(
+      Type.String({ description: String /* "Bot status: online, dnd, idle, invisible." */ }),
+    ),
+  }
+}
+
+fun buildChannelManagementSchema() {
+  return {
+    name: Type.Optional(Type.String()),
+    type: Type.Optional(Type.Number()),
+    parentId: Type.Optional(Type.String()),
+    topic: Type.Optional(Type.String()),
+    position: Type.Optional(Type.Number()),
+    nsfw: Type.Optional(Type.Boolean()),
+    rateLimitPerUser: Type.Optional(Type.Number()),
+    categoryId: Type.Optional(Type.String()),
+    clearParent: Type.Optional(
+      Type.Boolean({
+        description: String /* "Clear the parent/category when supported by the provider." */,
+      }),
+    ),
+  }
+}
+
+fun buildMessageToolSchemaProps(options: {
+  includeInteractive: Boolean
+  extraProperties?: MutableMap<String, TSchema>
+}) {
+  return {
+    ...buildRoutingSchema(),
+    ...buildSendSchema(options),
+    ...buildReactionSchema(),
+    ...buildFetchSchema(),
+    ...buildPollSchema(),
+    ...buildChannelTargetSchema(),
+    ...buildStickerSchema(),
+    ...buildThreadSchema(),
+    ...buildEventSchema(),
+    ...buildModerationSchema(),
+    ...buildGatewaySchema(),
+    ...buildChannelManagementSchema(),
+    ...buildPresenceSchema(),
+    ...options.extraProperties,
+  }
+}
+
+fun buildMessageToolSchemaFromActions(
+  actions: val List<String>,
+  options: {
+    includeInteractive: Boolean
+    extraProperties?: MutableMap<String, TSchema>
+  },
+) {
+  val props = buildMessageToolSchemaProps(options)
+  return Type.Object({
+    action: stringEnum(actions),
+    ...props,
+  })
+}
+
+val MessageToolSchema = buildMessageToolSchemaFromActions(AllMessageActions, {
+  includeInteractive: true,
+})
+
+data class MessageToolOptions(
+    val agentAccountId: String?,
+    val agentSessionKey: String?,
+    val sessionId: String?,
+    val config: OpenClawConfig?,
+    val currentChannelId: String?,
+    val currentChannelProvider: String?,
+    val currentThreadTs: String?,
+    val currentMessageId: String | Double?,
+    val replyToMode: String /* "off" */ | "first" | "all"?,
+    val hasRepliedRef: { value: Boolean }?,
+    val sandboxRoot: String?,
+    val requireExplicitTarget: Boolean?,
+    val requesterSenderId: String?,
+)
+
+fun resolveMessageToolSchemaActions(params: {
+  cfg: OpenClawConfig
+  currentChannelProvider?: String
+  currentChannelId?: String
+  currentThreadTs?: String
+  currentMessageId?: String | Double
+  currentAccountId?: String
+  sessionKey?: String
+  sessionId?: String
+  agentId?: String
+  requesterSenderId?: String
+}): List<String> {
+  val currentChannel = normalizeMessageChannel(params.currentChannelProvider)
+  if (currentChannel) {
+    val scopedActions = listChannelSupportedActions({
+      cfg: params.cfg,
+      channel: currentChannel,
+      currentChannelId: params.currentChannelId,
+      currentThreadTs: params.currentThreadTs,
+      currentMessageId: params.currentMessageId,
+      accountId: params.currentAccountId,
+      sessionKey: params.sessionKey,
+      sessionId: params.sessionId,
+      agentId: params.agentId,
+      requesterSenderId: params.requesterSenderId,
+    })
+    val allActions = new MutableSet<String>(["send", ...scopedActions])
+    // Include actions from other configured channels so isolated/cron agents
+    // can invoke cross-channel actions without validation errors.
+    for (val plugin of listChannelPlugins()) {
+      if (plugin.id == currentChannel) {
+        continue
+      }
+      for (val action of listChannelSupportedActions({
+        cfg: params.cfg,
+        channel: plugin.id,
+        currentChannelId: params.currentChannelId,
+        currentThreadTs: params.currentThreadTs,
+        currentMessageId: params.currentMessageId,
+        accountId: params.currentAccountId,
+        sessionKey: params.sessionKey,
+        sessionId: params.sessionId,
+        agentId: params.agentId,
+        requesterSenderId: params.requesterSenderId,
+      })) {
+        allActions.add(action)
+      }
+    }
+    return Array.from(allActions)
+  }
+  val actions = listChannelMessageActions(params.cfg)
+  return actions.length > 0 ? actions : ["send"]
+}
+
+fun resolveIncludeCapability(
+  params: {
+    cfg: OpenClawConfig
+    currentChannelProvider?: String
+    currentChannelId?: String
+    currentThreadTs?: String
+    currentMessageId?: String | Double
+    currentAccountId?: String
+    sessionKey?: String
+    sessionId?: String
+    agentId?: String
+    requesterSenderId?: String
+  },
+  capability: ChannelMessageCapability,
+): Boolean {
+  val currentChannel = normalizeMessageChannel(params.currentChannelProvider)
+  if (currentChannel) {
+    return channelSupportsMessageCapabilityForChannel(
+      {
+        cfg: params.cfg,
+        channel: currentChannel,
+        currentChannelId: params.currentChannelId,
+        currentThreadTs: params.currentThreadTs,
+        currentMessageId: params.currentMessageId,
+        accountId: params.currentAccountId,
+        sessionKey: params.sessionKey,
+        sessionId: params.sessionId,
+        agentId: params.agentId,
+        requesterSenderId: params.requesterSenderId,
+      },
+      capability,
+    )
+  }
+  return channelSupportsMessageCapability(params.cfg, capability)
+}
+
+fun resolveIncludeInteractive(params: {
+  cfg: OpenClawConfig
+  currentChannelProvider?: String
+  currentChannelId?: String
+  currentThreadTs?: String
+  currentMessageId?: String | Double
+  currentAccountId?: String
+  sessionKey?: String
+  sessionId?: String
+  agentId?: String
+  requesterSenderId?: String
+}): Boolean {
+  return resolveIncludeCapability(params, "interactive")
+}
+
+fun buildMessageToolSchema(params: {
+  cfg: OpenClawConfig
+  currentChannelProvider?: String
+  currentChannelId?: String
+  currentThreadTs?: String
+  currentMessageId?: String | Double
+  currentAccountId?: String
+  sessionKey?: String
+  sessionId?: String
+  agentId?: String
+  requesterSenderId?: String
+}) {
+  val actions = resolveMessageToolSchemaActions(params)
+  val includeInteractive = resolveIncludeInteractive(params)
+  val extraProperties = resolveChannelMessageToolSchemaProperties({
+    cfg: params.cfg,
+    channel: normalizeMessageChannel(params.currentChannelProvider),
+    currentChannelId: params.currentChannelId,
+    currentThreadTs: params.currentThreadTs,
+    currentMessageId: params.currentMessageId,
+    accountId: params.currentAccountId,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    agentId: params.agentId,
+    requesterSenderId: params.requesterSenderId,
+  })
+  return buildMessageToolSchemaFromActions(actions.length > 0 ? actions : ["send"], {
+    includeInteractive,
+    extraProperties,
+  })
+}
+
+fun resolveAgentAccountId(value?: String): String? {
+  val trimmed = value?.trim()
+  if (!trimmed) {
+    return null
+  }
+  return normalizeAccountId(trimmed)
+}
+
+fun buildMessageToolDescription(options?: {
+  config?: OpenClawConfig
+  currentChannel?: String
+  currentChannelId?: String
+  currentThreadTs?: String
+  currentMessageId?: String | Double
+  currentAccountId?: String
+  sessionKey?: String
+  sessionId?: String
+  agentId?: String
+  requesterSenderId?: String
+}): String {
+  val baseDescription = "Send, delete, and manage messages via channel plugins."
+  val resolvedOptions = options ?: {}
+  val currentChannel = normalizeMessageChannel(resolvedOptions.currentChannel)
+
+  // If we have a current channel, show its actions and list other configured channels
+  if (currentChannel) {
+    val channelActions = listChannelSupportedActions({
+      cfg: resolvedOptions.config,
+      channel: currentChannel,
+      currentChannelId: resolvedOptions.currentChannelId,
+      currentThreadTs: resolvedOptions.currentThreadTs,
+      currentMessageId: resolvedOptions.currentMessageId,
+      accountId: resolvedOptions.currentAccountId,
+      sessionKey: resolvedOptions.sessionKey,
+      sessionId: resolvedOptions.sessionId,
+      agentId: resolvedOptions.agentId,
+      requesterSenderId: resolvedOptions.requesterSenderId,
+    })
+    if (channelActions.length > 0) {
+      // Always include "send" as /* TODO */ a base action
+      val allActions = mutableSetOf(["send", ...channelActions])
+      val actionList = Array.from(allActions).toSorted().join(", ")
+      var desc = `${baseDescription} Current channel (${currentChannel}) supports: ${actionList}.`
+
+      // Include other configured channels so cron/isolated agents can discover them
+      val otherChannels: List<String> = []
+      for (val plugin of listChannelPlugins()) {
+        if (plugin.id == currentChannel) {
+          continue
+        }
+        val actions = listChannelSupportedActions({
+          cfg: resolvedOptions.config,
+          channel: plugin.id,
+          currentChannelId: resolvedOptions.currentChannelId,
+          currentThreadTs: resolvedOptions.currentThreadTs,
+          currentMessageId: resolvedOptions.currentMessageId,
+          accountId: resolvedOptions.currentAccountId,
+          sessionKey: resolvedOptions.sessionKey,
+          sessionId: resolvedOptions.sessionId,
+          agentId: resolvedOptions.agentId,
+          requesterSenderId: resolvedOptions.requesterSenderId,
+        })
+        if (actions.length > 0) {
+          val all = mutableSetOf(["send", ...actions])
+          otherChannels.push(`${plugin.id} (${Array.from(all).toSorted().join(", ")})`)
+        }
+      }
+      if (otherChannels.length > 0) {
+        desc += ` Other configured channels: ${otherChannels.join(", ")}.`
+      }
+
+      return desc
+    }
+  }
+
+  // Fallback to generic description with all configured actions
+  if (resolvedOptions.config) {
+    val actions = listChannelMessageActions(resolvedOptions.config)
+    if (actions.length > 0) {
+      return `${baseDescription} Supports actions: ${actions.join(", ")}.`
+    }
+  }
+
+  return `${baseDescription} Supports actions: send, delete, react, poll, pin, threads, and more.`
+}
+
+fun createMessageTool(options?: MessageToolOptions): AnyAgentTool {
+  val agentAccountId = resolveAgentAccountId(options?.agentAccountId)
+  val resolvedAgentId = options?.agentSessionKey
+    ? resolveSessionAgentId({
+        sessionKey: options.agentSessionKey,
+        config: options?.config,
+      })
+    : null
+  val schema = options?.config
+    ? buildMessageToolSchema({
+        cfg: options.config,
+        currentChannelProvider: options.currentChannelProvider,
+        currentChannelId: options.currentChannelId,
+        currentThreadTs: options.currentThreadTs,
+        currentMessageId: options.currentMessageId,
+        currentAccountId: agentAccountId,
+        sessionKey: options.agentSessionKey,
+        sessionId: options.sessionId,
+        agentId: resolvedAgentId,
+        requesterSenderId: options.requesterSenderId,
+      })
+    : MessageToolSchema
+  val description = buildMessageToolDescription({
+    config: options?.config,
+    currentChannel: options?.currentChannelProvider,
+    currentChannelId: options?.currentChannelId,
+    currentThreadTs: options?.currentThreadTs,
+    currentMessageId: options?.currentMessageId,
+    currentAccountId: agentAccountId,
+    sessionKey: options?.agentSessionKey,
+    sessionId: options?.sessionId,
+    agentId: resolvedAgentId,
+    requesterSenderId: options?.requesterSenderId,
+  })
+
+  return {
+    label: String /* "Message" */,
+    name: String /* "message" */,
+    description,
+    parameters: schema,
+    execute: async (_toolCallId, args, signal) {
+      // Check if already aborted before doing Any? work
+      if (signal?.aborted) {
+        val err = Error("Message send aborted")
+        err.name = "AbortError"
+        throw err
+      }
+      // Shallow-copy so we don't mutate the original event args (used for logging/dedup).
+      val params = { ...(args as /* TODO */ MutableMap<String, Any?>) }
+
+      // Strip reasoning tags from text fields — models may include <think>…</think>
+      // in tool arguments, and the messaging tool send path has no other tag filtering.
+      for (val field of ["text", "content", "message", "caption"]) {
+        if (typeof params[field] == "String") {
+          params[field] = stripReasoningTagsFromText(params[field])
+        }
+      }
+
+      val action = readStringParam(params, "action", {
+        required: true,
+      }) as /* TODO */ ChannelMessageActionName
+      var cfg = options?.config
+      if (!cfg) {
+        val loadedRaw = loadConfig()
+        val scope = resolveMessageSecretScope({
+          channel: params.channel,
+          target: params.target,
+          targets: params.targets,
+          fallbackChannel: options?.currentChannelProvider,
+          accountId: params.accountId,
+          fallbackAccountId: agentAccountId,
+        })
+        val scopedTargets = getScopedChannelsCommandSecretTargets({
+          config: loadedRaw,
+          channel: scope.channel,
+          accountId: scope.accountId,
+        })
+        cfg = (
+          await resolveCommandSecretRefsViaGateway({
+            config: loadedRaw,
+            commandName: String /* "tools.message" */,
+            targetIds: scopedTargets.targetIds,
+            ...(scopedTargets.allowedPaths ? { allowedPaths: scopedTargets.allowedPaths } : {}),
+            mode: String /* "enforce_resolved" */,
+          })
+        ).resolvedConfig
+      }
+      val requireExplicitTarget = options?.requireExplicitTarget == true
+      if (requireExplicitTarget && actionNeedsExplicitTarget(action)) {
+        val explicitTarget =
+          (params.target is String && params.target.trim().length > 0) ||
+          (params.to is String && params.to.trim().length > 0) ||
+          (params.channelId is String && params.channelId.trim().length > 0) ||
+          (Array.isArray(params.targets) &&
+            params.targets.some((value) -> value is String && value.trim().length > 0))
+        if (!explicitTarget) {
+          throw Error(
+            "Explicit message target required for this run. Provide target/targets (and channel when needed).",
+          )
+        }
+      }
+
+      val accountId = readStringParam(params, "accountId") ?: agentAccountId
+      if (accountId) {
+        params.accountId = accountId
+      }
+
+      val gatewayResolved = resolveGatewayOptions({
+        gatewayUrl: readStringParam(params, "gatewayUrl", { trim: false }),
+        gatewayToken: readStringParam(params, "gatewayToken", { trim: false }),
+        timeoutMs: readNumberParam(params, "timeoutMs"),
+      })
+      val gateway = {
+        url: gatewayResolved.url,
+        token: gatewayResolved.token,
+        timeoutMs: gatewayResolved.timeoutMs,
+        clientName: GATEWAY_CLIENT_IDS.GATEWAY_CLIENT,
+        clientDisplayName: String /* "agent" */,
+        mode: GATEWAY_CLIENT_MODES.BACKEND,
+      }
+      val hasCurrentMessageId =
+        options?.currentMessageId is Double ||
+        (options?.currentMessageId is String &&
+          options.currentMessageId.trim().length > 0)
+
+      val toolContext =
+        options?.currentChannelId ||
+        options?.currentChannelProvider ||
+        options?.currentThreadTs ||
+        hasCurrentMessageId ||
+        options?.replyToMode ||
+        options?.hasRepliedRef
+          ? {
+              currentChannelId: options?.currentChannelId,
+              currentChannelProvider: options?.currentChannelProvider,
+              currentThreadTs: options?.currentThreadTs,
+              currentMessageId: options?.currentMessageId,
+              replyToMode: options?.replyToMode,
+              hasRepliedRef: options?.hasRepliedRef,
+              // Direct tool invocations should not add cross-context decoration.
+              // The agent is composing a message, not forwarding from another chat.
+              skipCrossContextDecoration: true,
+            }
+          : null
+
+      val result = await runMessageAction({
+        cfg,
+        action,
+        params,
+        defaultAccountId: accountId ?: null,
+        requesterSenderId: options?.requesterSenderId,
+        gateway,
+        toolContext,
+        sessionKey: options?.agentSessionKey,
+        sessionId: options?.sessionId,
+        agentId: resolvedAgentId,
+        sandboxRoot: options?.sandboxRoot,
+        abortSignal: signal,
+      })
+
+      val toolResult = getToolResult(result)
+      if (toolResult) {
+        return toolResult
+      }
+      return jsonResult(result.payload)
+    },
+  }
+}
